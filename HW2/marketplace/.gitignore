@@ -1,0 +1,3 @@
+generated/
+.pytest_cache/
+.env

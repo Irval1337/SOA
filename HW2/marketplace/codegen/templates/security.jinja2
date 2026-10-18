@@ -1,0 +1,17 @@
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi.security import HTTPBearer
+from pydantic import BaseModel, ConfigDict
+
+from .models import UserRole
+
+bearer_auth = HTTPBearer(scheme_name='bearerAuth', bearerFormat='JWT', auto_error=False)
+
+
+class Principal(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    user_id: UUID
+    role: UserRole

@@ -1,0 +1,74 @@
+name: marketplace
+
+x-db-env: &db-env
+  POSTGRES_DB: marketplace
+  POSTGRES_USER: marketplace
+  POSTGRES_PASSWORD: marketplace
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+asyncpg://marketplace:marketplace@postgres:5432/marketplace
+  JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-0123456789abcdef}
+  ACCESS_TOKEN_TTL_MINUTES: 15
+  REFRESH_TOKEN_TTL_DAYS: 7
+  ORDER_RATE_LIMIT_MINUTES: ${ORDER_RATE_LIMIT_MINUTES:-1}
+  ADMIN_EMAIL: admin@example.com
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-AdminPassw0rd}
+  LOG_LEVEL: INFO
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: *db-env
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marketplace -d marketplace"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  flyway:
+    image: flyway/flyway:13.10-alpine
+    command: migrate
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/marketplace
+      FLYWAY_USER: marketplace
+      FLYWAY_PASSWORD: marketplace
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      FLYWAY_CONNECT_RETRIES: 10
+    volumes:
+      - ./marketplace/db/migration:/flyway/sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build:
+      context: ./marketplace
+      target: runtime
+    image: marketplace/app:1.0.0
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      flyway:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  tests:
+    profiles: [test]
+    build:
+      context: ./marketplace
+      target: test
+    environment:
+      <<: *app-env
+      BASE_URL: http://app:8000
+      TEST_DATABASE_URL: postgresql://marketplace:marketplace@postgres:5432/marketplace
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  pgdata:

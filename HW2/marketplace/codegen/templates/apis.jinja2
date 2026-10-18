@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Callable, Optional
+
+from fastapi import APIRouter, Depends, Response, Security
+
+from .responses import ContractJSONResponse
+from .security import Principal
+
+{{ imports }}
+{% for group in api_groups %}
+
+
+class {{ group.interface }}(ABC):
+{% for op in group.operations %}
+
+    @abstractmethod
+    async def {{ op.function_name }}(
+        self,
+{%- if op.secured or op.interface_params %}
+        *,
+{%- endif %}
+{%- if op.secured %}
+        principal: Principal,
+{%- endif %}
+{%- for param in op.interface_params %}
+        {{ param }},
+{%- endfor %}
+    ) -> {{ op.response }}:
+        ...
+{%- endfor %}
+
+
+def {{ group.factory }}(
+    implementation: Callable[..., {{ group.interface }}],
+    authorize: Optional[Callable[..., Principal]] = None,
+) -> APIRouter:
+{%- if group.secured %}
+    if authorize is None:
+        raise ValueError("{{ group.factory }}() requires the `authorize` dependency")
+{%- endif %}
+    router = APIRouter(tags=['{{ group.tag }}'])
+{% for op in group.operations %}
+
+    @router.{{ op.method }}(
+        '{{ op.path }}',
+        status_code={{ op.status_code }},
+        response_model=None,
+        operation_id='{{ op.function_name }}',
+    )
+    async def {{ op.function_name }}(
+{%- for param in op.route_params %}
+        {{ param }},
+{%- endfor %}
+{%- if op.secured %}
+        principal: Principal = Security(authorize, scopes={{ op.roles }}),
+{%- endif %}
+        service: {{ group.interface }} = Depends(implementation),
+    ) -> Response:
+        result = await service.{{ op.function_name }}(
+{%- if op.secured %}
+            principal=principal,
+{%- endif %}
+{%- for name in op.names %}
+            {{ name }}={{ name }},
+{%- endfor %}
+        )
+{%- if op.response == 'None' %}
+        return Response(status_code={{ op.status_code }})
+{%- else %}
+        payload = {{ op.response }}.model_validate(result, from_attributes=True)
+        return ContractJSONResponse(
+            payload.model_dump(mode='python', by_alias=True),
+            status_code={{ op.status_code }},
+        )
+{%- endif %}
+{%- endfor %}
+
+    return router
+{%- endfor %}
