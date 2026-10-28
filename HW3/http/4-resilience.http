@@ -1,0 +1,73 @@
+# Retry, circuit breaker, Redis failover, компенсация
+# Каждый блок начинается с команды в терминале (из HW3/). Логи смотреть в make logs.
+
+@base = http://localhost:8081
+
+### 200 Все работает
+GET {{base}}/flights/1
+
+# ---------- Retry и circuit breaker ----------
+#   docker compose stop flight-service
+
+### 504 FLIGHT_SERVICE_TIMEOUT или 503: в логах booking 3 попытки, паузы 100 и 200 ms
+# GetFlight failed with DEADLINE_EXCEEDED (attempt 1/3), retrying in 100 ms
+GET {{base}}/flights/1
+
+### Повторить еще 4 раза. После 5 неудач за 30 с в логах: circuit breaker CLOSED -> OPEN
+GET {{base}}/flights/1
+
+### 503 FLIGHT_SERVICE_UNAVAILABLE сразу, без попыток, с заголовком Retry-After
+GET {{base}}/flights/1
+
+### 503 Бронь тоже сразу 503, в bookings ничего не появляется
+POST {{base}}/bookings
+Content-Type: application/json
+
+{"user_id": "cb", "flight_id": 1, "passenger_name": "Ivan", "passenger_email": "ivan@example.com", "seat_count": 1}
+
+# Подождать 15 с (CB_OPEN_TIMEOUT_SECONDS), Flight Service все еще лежит
+
+### 503 Пробный запрос упал: OPEN -> HALF_OPEN -> OPEN
+GET {{base}}/flights/1
+
+#   docker compose start flight-service
+# Подождать 15 с
+
+### 200 Пробный запрос прошел: OPEN -> HALF_OPEN -> CLOSED
+GET {{base}}/flights/1
+
+# ---------- Redis failover ----------
+#   make redis-master                  -> 172.28.0.10 (redis-master) у всех трех sentinel
+#   docker compose stop redis-master
+
+### 200 Кеш недоступен, но ответ есть: в логах flight-service cache unavailable, данные из БД
+GET {{base}}/flights/2
+
+# Подождать ~10 с
+#   make redis-master                  -> 172.28.0.11, реплика стала мастером
+#   docker compose logs redis-sentinel-1 | grep -E 'odown|switch-master'
+
+### 200 Кеш снова работает на новом мастере: cache miss flight:2
+GET {{base}}/flights/2
+
+### 200 cache hit flight:2
+GET {{base}}/flights/2
+
+#   docker compose start redis-master
+# Подождать ~10 с, sentinel переведет старый мастер в реплику
+#   docker compose exec redis-master redis-cli info replication | grep role   -> role:slave
+
+# ---------- Компенсация ----------
+#   docker compose stop booking-db
+
+### 500 INTERNAL_ERROR: места зарезервированы, а запись брони не прошла
+# В логах: reserved 2 seats on flight 3, затем compensation: released reservation
+POST {{base}}/bookings
+Content-Type: application/json
+
+{"user_id": "comp", "flight_id": 3, "passenger_name": "Petr", "passenger_email": "petr@example.com", "seat_count": 2}
+
+#   docker compose start booking-db
+
+### 200 На рейсе 3 снова 180 мест, а в seat_reservations резервация RELEASED
+GET {{base}}/flights/3

@@ -1,0 +1,194 @@
+name: flight-booking
+
+x-flight-api-key: &flight-api-key ${FLIGHT_SERVICE_API_KEY:-dev-flight-service-key}
+
+x-postgres: &postgres
+  image: postgres:16-alpine
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+
+x-flyway: &flyway
+  image: flyway/flyway:13.10-alpine
+  command: migrate
+
+x-sentinel: &sentinel
+  image: redis:7-alpine
+  command: sh /etc/redis/sentinel-entrypoint.sh
+  environment:
+    SENTINEL_TILT_PERIOD_MS: ${SENTINEL_TILT_PERIOD_MS-3000}
+  volumes:
+    - ./redis/sentinel.conf:/etc/redis/sentinel.conf:ro
+    - ./redis/sentinel-entrypoint.sh:/etc/redis/sentinel-entrypoint.sh:ro
+  depends_on:
+    redis-master:
+      condition: service_healthy
+
+services:
+  flight-db:
+    <<: *postgres
+    environment:
+      POSTGRES_DB: flights
+      POSTGRES_USER: flights
+      POSTGRES_PASSWORD: flights
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - flight-pgdata:/var/lib/postgresql/data
+
+  flight-migrations:
+    <<: *flyway
+    environment:
+      FLYWAY_URL: jdbc:postgresql://flight-db:5432/flights
+      FLYWAY_USER: flights
+      FLYWAY_PASSWORD: flights
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+    volumes:
+      - ./flight-service/migrations:/flyway/sql:ro
+    depends_on:
+      flight-db:
+        condition: service_healthy
+
+  booking-db:
+    <<: *postgres
+    environment:
+      POSTGRES_DB: bookings
+      POSTGRES_USER: bookings
+      POSTGRES_PASSWORD: bookings
+    ports:
+      - "127.0.0.1:5435:5432"
+    volumes:
+      - booking-pgdata:/var/lib/postgresql/data
+
+  booking-migrations:
+    <<: *flyway
+    environment:
+      FLYWAY_URL: jdbc:postgresql://booking-db:5432/bookings
+      FLYWAY_USER: bookings
+      FLYWAY_PASSWORD: bookings
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+    volumes:
+      - ./booking-service/migrations:/flyway/sql:ro
+    depends_on:
+      booking-db:
+        condition: service_healthy
+
+  redis-master:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly no
+    networks:
+      default:
+        ipv4_address: 172.28.0.10
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis-replica:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly no --replicaof 172.28.0.10 6379
+    networks:
+      default:
+        ipv4_address: 172.28.0.11
+    depends_on:
+      redis-master:
+        condition: service_healthy
+
+  redis-sentinel-1:
+    <<: *sentinel
+    networks:
+      default:
+        ipv4_address: 172.28.0.21
+  redis-sentinel-2:
+    <<: *sentinel
+    networks:
+      default:
+        ipv4_address: 172.28.0.22
+  redis-sentinel-3:
+    <<: *sentinel
+    networks:
+      default:
+        ipv4_address: 172.28.0.23
+
+  flight-service:
+    build:
+      context: .
+      dockerfile: flight-service/Dockerfile
+      target: runtime
+    image: flight-booking/flight-service:1.0.0
+    environment: &flight-env
+      DATABASE_URL: postgresql://flights:flights@flight-db:5432/flights
+      FLIGHT_SERVICE_API_KEY: *flight-api-key
+      GRPC_PORT: 50051
+      REDIS_SENTINELS: 172.28.0.21:26379,172.28.0.22:26379,172.28.0.23:26379
+      REDIS_MASTER_NAME: mymaster
+      CACHE_TTL_SECONDS: 300
+    ports:
+      - "127.0.0.1:50051:50051"
+    depends_on:
+      flight-migrations:
+        condition: service_completed_successfully
+      redis-sentinel-1:
+        condition: service_started
+      redis-sentinel-2:
+        condition: service_started
+      redis-sentinel-3:
+        condition: service_started
+    restart: unless-stopped
+
+  booking-service:
+    build:
+      context: .
+      dockerfile: booking-service/Dockerfile
+      target: runtime
+    image: flight-booking/booking-service:1.0.0
+    environment:
+      DATABASE_URL: postgresql://bookings:bookings@booking-db:5432/bookings
+      FLIGHT_SERVICE_ADDR: flight-service:50051
+      FLIGHT_SERVICE_API_KEY: *flight-api-key
+      FLIGHT_RPC_TIMEOUT_SECONDS: 2
+      RETRY_MAX_ATTEMPTS: 3
+      RETRY_BASE_DELAY_MS: 100
+      CB_FAILURE_THRESHOLD: 5
+      CB_WINDOW_SECONDS: 30
+      CB_OPEN_TIMEOUT_SECONDS: 15
+    ports:
+      - "127.0.0.1:8081:8000"
+    depends_on:
+      booking-migrations:
+        condition: service_completed_successfully
+      flight-service:
+        condition: service_started
+    restart: unless-stopped
+
+  flight-tests:
+    profiles: [test]
+    build:
+      context: .
+      dockerfile: flight-service/Dockerfile
+      target: test
+    environment: *flight-env
+    depends_on:
+      - redis-sentinel-1
+      - redis-sentinel-2
+      - redis-sentinel-3
+
+  booking-tests:
+    profiles: [test]
+    build:
+      context: .
+      dockerfile: booking-service/Dockerfile
+      target: test
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  flight-pgdata:
+  booking-pgdata:

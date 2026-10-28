@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package flight.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Errors for all methods: UNAUTHENTICATED (no or wrong x-api-key), INVALID_ARGUMENT.
+service FlightService {
+  rpc SearchFlights(SearchFlightsRequest) returns (SearchFlightsResponse);
+
+  // NOT_FOUND
+  rpc GetFlight(GetFlightRequest) returns (Flight);
+
+  // Idempotent by booking_id.
+  // NOT_FOUND, FAILED_PRECONDITION (flight is not SCHEDULED), RESOURCE_EXHAUSTED (not enough seats),
+  // ALREADY_EXISTS (booking_id is used by another reservation)
+  rpc ReserveSeats(ReserveSeatsRequest) returns (SeatReservation);
+
+  // Idempotent. NOT_FOUND
+  rpc ReleaseReservation(ReleaseReservationRequest) returns (SeatReservation);
+
+  // NOT_FOUND
+  rpc UpdateFlight(UpdateFlightRequest) returns (Flight);
+}
+
+enum FlightStatus {
+  FLIGHT_STATUS_UNSPECIFIED = 0;
+  FLIGHT_STATUS_SCHEDULED = 1;
+  FLIGHT_STATUS_DEPARTED = 2;
+  FLIGHT_STATUS_CANCELLED = 3;
+  FLIGHT_STATUS_COMPLETED = 4;
+}
+
+enum ReservationStatus {
+  RESERVATION_STATUS_UNSPECIFIED = 0;
+  RESERVATION_STATUS_ACTIVE = 1;
+  RESERVATION_STATUS_RELEASED = 2;
+  RESERVATION_STATUS_EXPIRED = 3;
+}
+
+message Airline {
+  string iata_code = 1;
+  string name = 2;
+}
+
+message Flight {
+  int64 id = 1;
+  string flight_number = 2;
+  Airline airline = 3;
+  string origin = 4;
+  string destination = 5;
+  google.protobuf.Timestamp departure_time = 6;
+  google.protobuf.Timestamp arrival_time = 7;
+  int32 total_seats = 8;
+  int32 available_seats = 9;
+  int64 price_kopecks = 10;
+  FlightStatus status = 11;
+}
+
+message SeatReservation {
+  int64 id = 1;
+  int64 flight_id = 2;
+  string booking_id = 3;
+  int32 seat_count = 4;
+  ReservationStatus status = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message SearchFlightsRequest {
+  string origin = 1;
+  string destination = 2;
+  optional google.protobuf.Timestamp departure_date = 3;
+}
+
+message SearchFlightsResponse {
+  repeated Flight flights = 1;
+}
+
+message GetFlightRequest {
+  int64 flight_id = 1;
+}
+
+message ReserveSeatsRequest {
+  int64 flight_id = 1;
+  int32 seat_count = 2;
+  string booking_id = 3;
+}
+
+message ReleaseReservationRequest {
+  string booking_id = 1;
+}
+
+message UpdateFlightRequest {
+  int64 flight_id = 1;
+  optional int64 price_kopecks = 2;
+  optional FlightStatus status = 3;
+}

@@ -1,0 +1,75 @@
+# Инвалидация кеша, идемпотентность, аутентификация gRPC
+# Запросы выполнять сверху вниз. Команды make запускать в терминале из HW3/ там, где указано.
+
+@base = http://localhost:8081
+@run = 1
+
+### 200 Прогреть кеш: рейс 4 (SU1234 на 2026-12-02), цена 6100
+GET {{base}}/flights/4
+
+### 200 Прогреть кеш поиска: SU1234 за 6100
+GET {{base}}/flights?origin=SVO&destination=LED&date=2026-12-02
+
+# Теперь в терминале поменять цену напрямую во Flight Service через UpdateFlight:
+#   make grpc METHOD=UpdateFlight DATA='{"flight_id": 4, "price_kopecks": 700000}'
+# В логах flight-service: updated flight 4, cache invalidated flight:4 search:SVO:LED:2026-12-02 search:SVO:LED:any
+
+### 200 Цена уже 7000, а не через 5 минут по TTL: cache miss flight:4
+GET {{base}}/flights/4
+
+### 200 В поиске тоже 7000
+GET {{base}}/flights?origin=SVO&destination=LED&date=2026-12-02
+
+### 201 Бронь по новой цене: 2 * 7000 = 14000
+# @name priced
+POST {{base}}/bookings
+Content-Type: application/json
+
+{"user_id": "cache-{{run}}", "flight_id": 4, "passenger_name": "Oleg", "passenger_email": "oleg@example.com", "seat_count": 2}
+
+# Снова поменять цену:
+#   make grpc METHOD=UpdateFlight DATA='{"flight_id": 4, "price_kopecks": 800000}'
+
+### 200 Цена в брони не изменилась: total_price зафиксирован на момент бронирования, 14000
+GET {{base}}/bookings/{{priced.response.body.$.id}}
+
+# Отменить рейс 4:
+#   make grpc METHOD=UpdateFlight DATA='{"flight_id": 4, "status": "FLIGHT_STATUS_CANCELLED"}'
+
+### 200 Рейс 4 пропал из поиска: ищутся только SCHEDULED
+GET {{base}}/flights?origin=SVO&destination=LED&date=2026-12-02
+
+### 409 FLIGHT_NOT_AVAILABLE: на отмененный рейс не забронировать
+POST {{base}}/bookings
+Content-Type: application/json
+
+{"user_id": "cache-{{run}}", "flight_id": 4, "passenger_name": "Oleg", "passenger_email": "oleg@example.com", "seat_count": 1}
+
+# Ключи кеша и TTL (у всех ключей есть TTL, включая version:*):
+#   make redis-keys
+
+# Аутентификация, в терминале:
+#   make grpc API_KEY=          -> Code: Unauthenticated, missing or invalid x-api-key
+#   make grpc API_KEY=wrong     -> Code: Unauthenticated
+#   make grpc                   -> рейс 1, ключ правильный
+#
+# Идемпотентность ReserveSeats: два одинаковых вызова дают одну резервацию с тем же id, места списаны один раз.
+# При повторном прогоне взять другой booking_id или сделать make down
+#   make grpc METHOD=ReserveSeats DATA='{"flight_id": 7, "seat_count": 2, "booking_id": "22222222-2222-2222-2222-222222222222"}'
+#   make grpc METHOD=ReserveSeats DATA='{"flight_id": 7, "seat_count": 2, "booking_id": "22222222-2222-2222-2222-222222222222"}'
+#   make grpc METHOD=ReserveSeats DATA='{"flight_id": 7, "seat_count": 3, "booking_id": "22222222-2222-2222-2222-222222222222"}'  -> AlreadyExists
+
+### 200 На рейсе 7 стало 118 мест, а не 116
+GET {{base}}/flights/7
+
+#   make grpc METHOD=ReleaseReservation DATA='{"booking_id": "22222222-2222-2222-2222-222222222222"}'
+#   make grpc METHOD=ReleaseReservation DATA='{"booking_id": "22222222-2222-2222-2222-222222222222"}'  -> тот же ответ, RELEASED
+
+### 200 Места вернулись один раз: 120
+GET {{base}}/flights/7
+
+# Гонка за последние места, в терминале:
+#   make race   -> 3 201 и 7 409, на рейсе 6 было 3 места
+
+### 200 На рейсе 6 ровно 0 мест, не меньше
+GET {{base}}/flights/6

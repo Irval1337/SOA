@@ -1,0 +1,110 @@
+# Бронирования: создание, получение, список, отмена, ошибки
+# Запросы выполнять сверху вниз. Перед повторным прогоном: make down && make up-d, или поменять run.
+
+@base = http://localhost:8081
+@run = 1
+@user = user-{{run}}
+
+### Подготовка: рейс 1 до брони, запомнить available_seats
+GET {{base}}/flights/1
+
+### 201 Бронь 2 мест на рейс 1: GetFlight -> ReserveSeats -> total_price = 2 * 5500 = 11000, CONFIRMED
+# В логах flight-service: reserved 2 seats ..., cache invalidated flight:1 search:SVO:LED:2026-12-01 search:SVO:LED:any
+# @name booking
+POST {{base}}/bookings
+Content-Type: application/json
+
+{
+  "user_id": "{{user}}",
+  "flight_id": 1,
+  "passenger_name": "Ivan Ivanov",
+  "passenger_email": "ivan@example.com",
+  "seat_count": 2
+}
+
+### 200 available_seats уменьшилось на 2, в логах cache miss: кеш инвалидирован
+GET {{base}}/flights/1
+
+### 201 Вторая бронь того же пользователя на другой рейс: 3 * 4900 = 14700
+# @name booking2
+POST {{base}}/bookings
+Content-Type: application/json
+
+{
+  "user_id": "{{user}}",
+  "flight_id": 2,
+  "passenger_name": "Maria Ivanova",
+  "passenger_email": "maria@example.com",
+  "seat_count": 3
+}
+
+### 200 Бронь по id
+GET {{base}}/bookings/{{booking.response.body.$.id}}
+
+### 200 Все брони пользователя, новые сверху
+GET {{base}}/bookings?user_id={{user}}
+
+### 200 Пустой список у пользователя без броней
+GET {{base}}/bookings?user_id=nobody-{{run}}
+
+### 422 user_id обязателен
+GET {{base}}/bookings
+
+### 404 BOOKING_NOT_FOUND
+GET {{base}}/bookings/00000000-0000-0000-0000-000000000000
+
+### 422 id брони должен быть UUID
+GET {{base}}/bookings/123
+
+### 409 NOT_ENOUGH_SEATS: на рейсе 6 всего 3 места (RESOURCE_EXHAUSTED), бронь не создается
+POST {{base}}/bookings
+Content-Type: application/json
+
+{"user_id": "{{user}}", "flight_id": 6, "passenger_name": "Petr", "passenger_email": "petr@example.com", "seat_count": 4}
+
+### 409 FLIGHT_NOT_AVAILABLE: рейс 5 отменен (FAILED_PRECONDITION)
+POST {{base}}/bookings
+Content-Type: application/json
+
+{"user_id": "{{user}}", "flight_id": 5, "passenger_name": "Petr", "passenger_email": "petr@example.com", "seat_count": 1}
+
+### 404 NOT_FOUND: рейса нет, бронь не создается
+POST {{base}}/bookings
+Content-Type: application/json
+
+{"user_id": "{{user}}", "flight_id": 999, "passenger_name": "Petr", "passenger_email": "petr@example.com", "seat_count": 1}
+
+### 422 Все нарушения сразу: пустое имя, плохой email, seat_count 0
+POST {{base}}/bookings
+Content-Type: application/json
+
+{"user_id": "{{user}}", "flight_id": 1, "passenger_name": "", "passenger_email": "not-an-email", "seat_count": 0}
+
+### 422 Нет обязательных полей
+POST {{base}}/bookings
+Content-Type: application/json
+
+{"user_id": "{{user}}"}
+
+### 200 Список: ошибочные запросы броней не создали, по-прежнему 2
+GET {{base}}/bookings?user_id={{user}}
+
+### 200 Отмена: ReleaseReservation возвращает 2 места, статус CANCELLED
+# В логах flight-service: released 2 seats ..., cache invalidated flight:1 ...
+POST {{base}}/bookings/{{booking.response.body.$.id}}/cancel
+
+### 200 Места вернулись на рейс 1
+GET {{base}}/flights/1
+
+### 409 BOOKING_NOT_CONFIRMED: повторная отмена
+POST {{base}}/bookings/{{booking.response.body.$.id}}/cancel
+
+### 404 BOOKING_NOT_FOUND: отмена несуществующей брони
+POST {{base}}/bookings/00000000-0000-0000-0000-000000000000/cancel
+
+### 200 Вторая бронь при этом осталась CONFIRMED
+GET {{base}}/bookings/{{booking2.response.body.$.id}}
+
+# Таблицы после этого файла:
+#   make psql-flights:  SELECT * FROM seat_reservations ORDER BY id;
+#   make psql-bookings: SELECT id, user_id, flight_id, seat_count, total_price, status FROM bookings;

@@ -1,0 +1,7 @@
+**/__pycache__
+**/.venv
+**/.pytest_cache
+flight-service/flight
+booking-service/flight
+http
+docs

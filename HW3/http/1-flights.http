@@ -1,0 +1,44 @@
+# Рейсы: поиск, получение, валидация, кеш
+# Запросы выполнять сверху вниз. Параллельно смотреть make logs, там cache hit/miss.
+
+@base = http://localhost:8081
+
+### 200 Сервис жив
+GET {{base}}/health
+
+### 200 Поиск SVO -> LED на 2026-12-01: SU1234 и S71020. Отмененный SU1500 не попадает
+# В логах flight-service: cache miss search:SVO:LED:2026-12-01
+GET {{base}}/flights?origin=SVO&destination=LED&date=2026-12-01
+
+### 200 Тот же поиск еще раз: cache hit search:SVO:LED:2026-12-01
+GET {{base}}/flights?origin=SVO&destination=LED&date=2026-12-01
+
+### 200 Поиск без даты: рейсы за все даты, ключ search:SVO:LED:any
+GET {{base}}/flights?origin=SVO&destination=LED
+
+### 200 Пустой список: на этом маршруте рейсов нет
+GET {{base}}/flights?origin=LED&destination=AER
+
+### 422 destination обязателен
+GET {{base}}/flights?origin=SVO
+
+### 422 IATA-код только из трех заглавных букв
+GET {{base}}/flights?origin=svo&destination=LED
+
+### 422 Некорректная дата
+GET {{base}}/flights?origin=SVO&destination=LED&date=2026-13-01
+
+### 200 Рейс по id: cache miss flight:1, цена 5500, 150 мест
+GET {{base}}/flights/1
+
+### 200 Еще раз: cache hit flight:1
+GET {{base}}/flights/1
+
+### 200 Отмененный рейс по id отдается, status CANCELLED
+GET {{base}}/flights/5
+
+### 404 NOT_FOUND: рейса нет
+GET {{base}}/flights/999
+
+### 422 id должен быть положительным
+GET {{base}}/flights/0
