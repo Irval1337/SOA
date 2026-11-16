@@ -1,0 +1,61 @@
+@startuml
+title Вариант 1: failover: неизвестный исход push, доставка SMS
+hide footbox
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam sequence {
+  ParticipantBackgroundColor #23A2D9
+  ParticipantBorderColor #0E7DAD
+  ParticipantFontColor white
+  ActorBackgroundColor #083F75
+  ActorBorderColor #06315C
+  ActorFontColor white
+  GroupBackgroundColor white
+  ArrowColor #666666
+}
+skinparam DatabaseFontColor white
+skinparam QueueFontColor white
+skinparam NoteBackgroundColor #F4F4F4
+skinparam NoteBorderColor #999999
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 220
+autonumber
+participant "Delivery Worker" as Worker #23A2D9
+database "Delivery DB" as DB #23A2D9
+participant Dispatcher as Timer #23A2D9
+queue "RabbitMQ" as MQ #23A2D9
+participant "Push-провайдер" as Push #8C8496
+participant "SMS-провайдер" as SMS #8C8496
+participant "Notification API" as API #23A2D9
+participant "Приложение клиента" as App #8C8496
+
+note over Worker, DB: Уведомление принято в t0; push-попытка записана до HTTP
+Worker -> Push: Отправить push с attempt_id
+Push -x Worker: Ответ потерян после возможного приема
+Worker -> DB: UNKNOWN; сохранить deadline = t0 + 10 с
+Worker -> MQ: Ack исходной работы после commit
+note over Timer, DB: В t0 + 10 с срок найден по индексу БД
+Timer -> DB: Транзакция: запрос проверки + outbox
+Timer -> MQ: Опубликовать работу, получить confirm
+MQ -> Worker: Проверить попытку и выбрать следующий канал
+Worker -> Push: Проверить статус по client reference, если доступно
+Push --> Worker: Подтвержденная доставка неизвестна
+Worker -> DB: Под блокировкой: нет DELIVERED;
+note right of DB: создать единственную SMS-попытку и outbox
+Timer -> MQ: Опубликовать SMS-работу после commit и confirm
+MQ -> Worker: Выполнить запланированную SMS-попытку
+Worker -> DB: Проверить статус, настройки и lease перед HTTP
+Worker -> SMS: SMS с attempt_id как client reference
+SMS --> Worker: Принято + provider_message_id
+Worker -> DB: ACCEPTED_BY_PROVIDER; deadline = t0 + 40 с
+Worker -> MQ: Ack после commit
+SMS -> API: Подписанный финальный положительный DLR
+API -> DB: Транзакция: receipt + SMS CONFIRMED + DELIVERED
+API --> SMS: 200 после commit
+App -> API: Поздний ACK ранее отправленного push
+API -> DB: Добавить receipt; зафиксировать второе подтверждение
+note over Worker, DB: DELIVERED сохраняется, email не отправляется.
+note over Worker, DB: Ушедшую SMS нельзя отозвать; поздний дубль остается в истории.
+note over Timer, API: Без SMS DLR к 40 с — email; без подтверждения к 60 с — INCIDENT.
+@enduml

@@ -1,0 +1,62 @@
+@startuml
+title Вариант 2: основной сценарий: workflow ждет push ACK
+hide footbox
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam sequence {
+  ParticipantBackgroundColor #23A2D9
+  ParticipantBorderColor #0E7DAD
+  ParticipantFontColor white
+  ActorBackgroundColor #083F75
+  ActorBorderColor #06315C
+  ActorFontColor white
+  GroupBackgroundColor white
+  ArrowColor #666666
+}
+skinparam DatabaseFontColor white
+skinparam QueueFontColor white
+skinparam NoteBackgroundColor #F4F4F4
+skinparam NoteBorderColor #999999
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 220
+autonumber
+participant "Источник с outbox" as Source #8C8496
+participant "Notification API" as API #23A2D9
+database "Delivery DB" as DB #23A2D9
+participant "Outbox Relay" as Relay #23A2D9
+participant "Temporal Service\nи устойчивая история" as Temporal #23A2D9
+participant "Workflow Worker" as Workflow #23A2D9
+participant "Activity Worker" as Activity #23A2D9
+participant "FCM / APNs" as Push #8C8496
+participant "Приложение" as App #8C8496
+
+Source -> API: POST notification с ключом события
+API -> DB: Транзакция: dedup + notification + start-outbox
+DB --> API: Синхронный commit
+API --> Source: 202 + notification_id (t0)
+Relay -> DB: Забрать start-outbox
+Relay -> Temporal: StartWorkflow(workflow_id = notification_id)
+Temporal --> Relay: Запущен или уже существует
+Relay -> DB: Отметить передачу
+Temporal -> Workflow: Выполнить/продолжить workflow
+Workflow -> Temporal: Запланировать Activity отправки
+Temporal -> Activity: Задача Activity
+Activity -> DB: Проверить настройки, создать/восстановить попытку
+Activity -> Push: Push(notification_id, attempt_id)
+Push --> Activity: ACCEPTED_BY_PROVIDER, не подтверждение доставки
+Activity -> DB: Сохранить известный результат
+Activity --> Temporal: Результат Activity
+Temporal -> Workflow: Результат из истории
+Workflow -> Temporal: Ждать сигнал или устойчивый таймер t0 + 10 с
+Push -> App: Push
+App -> API: Аутентифицированный ACK после обработки для показа
+API -> DB: Транзакция: receipt + DELIVERED + signal-outbox
+API --> App: 200 после commit
+Relay -> DB: Забрать signal-outbox
+Relay -> Temporal: SignalReceipt(workflow_id, receipt_id)
+Temporal -> Workflow: Сигнал подтверждения
+Workflow -> Temporal: Завершить workflow без резервных каналов
+note over DB, Temporal: Повторы старта и сигналов идемпотентны.
+note over Activity, Temporal: Activity может повториться; внешняя отправка требует прежнего ключа и проверки статуса.
+@enduml

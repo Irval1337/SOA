@@ -1,0 +1,69 @@
+@startuml
+title Вариант 2: failover: устойчивый таймер и SMS Activity
+hide footbox
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam sequence {
+  ParticipantBackgroundColor #23A2D9
+  ParticipantBorderColor #0E7DAD
+  ParticipantFontColor white
+  ActorBackgroundColor #083F75
+  ActorBorderColor #06315C
+  ActorFontColor white
+  GroupBackgroundColor white
+  ArrowColor #666666
+}
+skinparam DatabaseFontColor white
+skinparam QueueFontColor white
+skinparam NoteBackgroundColor #F4F4F4
+skinparam NoteBorderColor #999999
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 220
+autonumber
+participant "Temporal Service\nи устойчивая история" as Temporal #23A2D9
+participant "Workflow Worker" as Workflow #23A2D9
+participant "Activity Worker" as Activity #23A2D9
+database "Delivery DB" as DB #23A2D9
+participant "Push-провайдер" as Push #8C8496
+participant "SMS-провайдер" as SMS #8C8496
+participant "Notification API" as API #23A2D9
+participant "Outbox Relay" as Relay #23A2D9
+
+note over Temporal, DB: Уведомление принято; workflow уже запущен
+Temporal -> Activity: Activity отправки push
+Activity -> DB: Записать/проверить push-попытку до HTTP
+Activity -> Push: Отправить push
+Push -x Activity: Ответ потерян
+Activity -> DB: UNKNOWN
+Activity --> Temporal: UNKNOWN, ожидание проверки статуса
+Temporal -> Workflow: Продолжить после результата
+Workflow -> Temporal: Устойчивый таймер t0 + 10 с
+note over Temporal, Workflow: Worker перезапускается; таймер и история остаются в Temporal
+Temporal -> Workflow: Таймер истек, восстановить workflow
+Workflow -> Temporal: Activity сверки статуса и планирования failover
+Temporal -> Activity: Выполнить сверку
+Activity -> Push: Поиск статуса по прежнему client reference, если доступен
+Push --> Activity: Подтверждения нет
+Activity -> DB: Транзакция: проверить DELIVERED;
+note right of DB: создать единственную SMS-попытку
+Activity --> Temporal: SMS запланирована
+Temporal -> Workflow: Результат сверки
+Workflow -> Temporal: Запланировать SMS Activity
+Temporal -> Activity: Отправка SMS
+Activity -> DB: Проверить актуальный статус, настройки и attempt_id
+Activity -> SMS: SMS с прежним ключом данной попытки
+SMS --> Activity: ACCEPTED_BY_PROVIDER
+Activity -> DB: Сохранить provider ID и срок t0 + 40 с
+Activity --> Temporal: Результат
+Temporal -> Workflow: Результат из истории
+Workflow -> Temporal: Ждать receipt или t0 + 40 с
+SMS -> API: Подписанный положительный DLR
+API -> DB: Транзакция: receipt + DELIVERED + signal-outbox
+API --> SMS: 200 после commit
+Relay -> Temporal: Receipt signal из надежного outbox
+Temporal -> Workflow: Подтверждение SMS
+Workflow -> Temporal: Завершить; email не планировать
+note over API, DB: Поздний push ACK сохраняется даже после завершения workflow.
+note over Temporal, Activity: Без DLR к 40 с — email; без подтверждения к 60 с — INCIDENT.
+@enduml

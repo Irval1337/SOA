@@ -1,0 +1,58 @@
+@startuml
+title Вариант 1: основной сценарий: push подтвержден
+hide footbox
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam sequence {
+  ParticipantBackgroundColor #23A2D9
+  ParticipantBorderColor #0E7DAD
+  ParticipantFontColor white
+  ActorBackgroundColor #083F75
+  ActorBorderColor #06315C
+  ActorFontColor white
+  GroupBackgroundColor white
+  ArrowColor #666666
+}
+skinparam DatabaseFontColor white
+skinparam QueueFontColor white
+skinparam NoteBackgroundColor #F4F4F4
+skinparam NoteBorderColor #999999
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 220
+autonumber
+participant "Продуктовый сервис\nи outbox источника" as Source #8C8496
+participant "Notification API" as API #23A2D9
+database "Delivery DB\nPostgreSQL HA" as DB #23A2D9
+participant Dispatcher as Relay #23A2D9
+queue "RabbitMQ\ncritical queue" as MQ #23A2D9
+participant "Delivery Worker" as Worker #23A2D9
+participant "FCM / APNs" as Push #8C8496
+participant "Приложение клиента" as App #8C8496
+
+Source -> Source: Зафиксировать операцию и событие в outbox
+Source -> API: POST notification(event_id, recipient_id, kind)
+API -> DB: Одна транзакция: dedup + notification + outbox
+DB --> API: Синхронный commit
+API --> Source: 202 + notification_id (t0)
+note over Source, API: Потеря ответа: повтор с тем же ключом возвращает прежний ID
+Relay -> DB: Забрать готовую outbox-запись
+Relay -> MQ: persistent + mandatory, ID работы
+MQ --> Relay: Publisher confirm (quorum), без basic.return
+Relay -> DB: Отметить публикацию
+MQ -> Worker: Работа по notification_id
+Worker -> DB: Проверить статус и настройки;
+note right of DB: Транзакция: ACTIVE, единственная push-попытка,
+note right of DB: lease и deadline = t0 + 10 с
+Worker -> Push: Отправить push(notification_id, attempt_id, короткий TTL)
+Push --> Worker: Принято провайдером + provider_message_id
+Worker -> DB: Сохранить ACCEPTED_BY_PROVIDER и срок проверки
+Worker -> MQ: Consumer ack после commit
+Push -> App: Push с идентификаторами
+App -> API: Аутентифицированный ACK после обработки для показа
+API -> DB: Транзакция: dedup receipt + CONFIRMED + DELIVERED
+DB --> API: Commit
+API --> App: 200
+note over DB, Worker: Таймер и повторная доставка работы увидят DELIVERED.
+note over DB, Worker: Новые каналы не отправляются. ACK не доказывает прочтение.
+@enduml
