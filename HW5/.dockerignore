@@ -1,0 +1,12 @@
+*
+!Dockerfile
+!requirements.txt
+!app
+!app/**
+!schema
+!schema/**
+!sql
+!sql/**
+!tests
+!tests/**
+**/__pycache__

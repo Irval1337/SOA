@@ -1,0 +1,38 @@
+# Сначала выполнить 1-events.http.
+
+@aggregation = http://localhost:8052
+@ch = http://localhost:8123
+@grafana = http://localhost:3050
+@day = 2025-02-10
+
+### 200 Пересчёт дня, events = 3
+POST {{aggregation}}/recalculate/{{day}}
+
+### 200 Повторный пересчёт, число строк в PostgreSQL то же
+#   docker compose exec -T postgres psql -U cinema -d cinema -c "SELECT metric, dimension, value, computed_at FROM daily_metrics WHERE day = '2025-02-10' ORDER BY metric, dimension"
+POST {{aggregation}}/recalculate/{{day}}
+
+### 200 Метрики в ClickHouse
+# DAU 2, среднее 6960 с, конверсия 50%, D1 и D7 по 50%.
+POST {{ch}}/
+X-ClickHouse-User: cinema
+X-ClickHouse-Key: cinema
+Content-Type: text/plain
+
+SELECT metric, dimension, value, rank, computed_at
+FROM cinema.daily_metrics
+WHERE day = '{{day}}'
+ORDER BY metric, rank, dimension
+FORMAT JSONEachRow
+
+### 200 Дашборд Grafana для даты когорты
+# http://localhost:3050/d/online-cinema?from=1739145600000&to=1739231999999
+GET {{grafana}}/api/dashboards/uid/online-cinema
+
+### 200 Экспорт JSON в S3
+POST {{aggregation}}/export/{{day}}
+
+### 200 Повторный экспорт по тому же ключу
+# Скачать JSON
+#   curl -fsS --aws-sigv4 'aws:amz:us-east-1:s3' -u cinema:cinema-local http://localhost:8333/movie-analytics/daily/2025-02-10/aggregates.json
+POST {{aggregation}}/export/{{day}}

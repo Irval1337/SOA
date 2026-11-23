@@ -1,0 +1,36 @@
+# Команды выполнять из HW5/.
+# Перед повтором поменять run.
+#   docker compose exec -T kafka-2 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-2:9092 --describe --topic movie-events
+
+@movie = http://localhost:8051
+@ch = http://localhost:8123
+@run = 1
+@user = hw5-failover-{{run}}
+
+### 200 Кластер работает
+GET {{movie}}/health
+
+### 201 Запись при двух брокерах
+#   docker compose stop kafka-1
+#   docker compose exec -T kafka-2 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-2:9092 --describe --topic movie-events
+# Дождаться лидеров и ISR из брокеров 2 и 3.
+POST {{movie}}/events
+Content-Type: application/json
+
+{"user_id":"{{user}}","movie_id":"arrival","event_type":"VIEW_STARTED","timestamp":"2025-02-22T16:00:00Z","device_type":"TV","session_id":"{{user}}","progress_seconds":0}
+
+### 200 Сверить event_id в ClickHouse
+# Если строки нет, повторить через секунду.
+POST {{ch}}/
+X-ClickHouse-User: cinema
+X-ClickHouse-Key: cinema
+Content-Type: text/plain
+
+SELECT event_id, user_id, movie_id, event_type
+FROM cinema.raw_events FINAL
+WHERE event_date = '2025-02-22' AND user_id = '{{user}}'
+FORMAT JSONEachRow
+
+### 200 После возврата брокера продюсер доступен
+#   docker compose start kafka-1
+GET {{movie}}/health

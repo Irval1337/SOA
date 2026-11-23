@@ -1,0 +1,7 @@
+boto3==1.38.46
+confluent-kafka==2.10.1
+fastapi==0.115.14
+fastavro==1.11.1
+httpx==0.28.1
+psycopg[binary]==3.2.9
+uvicorn==0.34.3

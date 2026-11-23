@@ -1,0 +1,246 @@
+name: movie-analytics
+
+x-kafka-environment: &kafka-environment
+  CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+  KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+
+x-kafka: &kafka
+  image: apache/kafka:3.9.1
+  restart: unless-stopped
+  healthcheck:
+    test: [CMD-SHELL, '/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1']
+    interval: 20s
+    timeout: 12s
+    retries: 12
+    start_period: 15s
+
+x-app-environment: &app-environment
+  KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+  SCHEMA_REGISTRY_URL: http://schema-registry:8081
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: cinema
+  CLICKHOUSE_PASSWORD: cinema
+  POSTGRES_DSN: postgresql://cinema:cinema@postgres:5432/cinema
+  S3_ENDPOINT: http://object-storage:8333
+  AWS_ACCESS_KEY_ID: cinema
+  AWS_SECRET_ACCESS_KEY: cinema-local
+  AWS_DEFAULT_REGION: us-east-1
+
+x-app: &app
+  build: .
+  image: movie-analytics-app:hw5
+  environment: *app-environment
+
+services:
+  kafka-1:
+    <<: *kafka
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
+    volumes:
+      - kafka-1:/var/lib/kafka/data
+  kafka-2:
+    <<: *kafka
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+    volumes:
+      - kafka-2:/var/lib/kafka/data
+  kafka-3:
+    <<: *kafka
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092
+    volumes:
+      - kafka-3:/var/lib/kafka/data
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.9.1
+    restart: unless-stopped
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka-1:9092,PLAINTEXT://kafka-2:9092,PLAINTEXT://kafka-3:9092
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 3
+      SCHEMA_REGISTRY_HEAP_OPTS: -Xms128m -Xmx256m
+    healthcheck:
+      test: [CMD, curl, -fsS, 'http://localhost:8081/subjects']
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8.33.6
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: cinema
+      CLICKHOUSE_PASSWORD: cinema
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - '127.0.0.1:${CLICKHOUSE_PORT:-8123}:8123'
+    volumes:
+      - clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: [CMD, wget, -q, --spider, 'http://127.0.0.1:8123/ping']
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cinema
+      POSTGRES_USER: cinema
+      POSTGRES_PASSWORD: cinema
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, cinema, -d, cinema]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  object-storage:
+    image: chrislusf/seaweedfs:4.53
+    command: [mini, -dir=/data, -ip.bind=0.0.0.0]
+    restart: unless-stopped
+    environment:
+      AWS_ACCESS_KEY_ID: cinema
+      AWS_SECRET_ACCESS_KEY: cinema-local
+      S3_BUCKET: movie-analytics
+    ports:
+      - '127.0.0.1:${S3_PORT:-8333}:8333'
+    volumes:
+      - object-storage:/data
+    healthcheck:
+      test: [CMD, wget, -q, --spider, 'http://127.0.0.1:8333/readyz']
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  kafka-init:
+    <<: *app
+    command: python -m app.bootstrap kafka
+    depends_on:
+      schema-registry:
+        condition: service_healthy
+
+  migrations:
+    <<: *app
+    command: python -m app.bootstrap databases
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  movie-service:
+    <<: *app
+    command: uvicorn app.producer:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    environment:
+      <<: *app-environment
+      DEMO_HISTORY_DAYS: ${DEMO_HISTORY_DAYS:-14}
+      GENERATOR_INTERVAL_SECONDS: ${GENERATOR_INTERVAL_SECONDS:-4}
+    ports:
+      - '127.0.0.1:${MOVIE_PORT:-8051}:8000'
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  aggregation:
+    <<: *app
+    command: uvicorn app.aggregation:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    environment:
+      <<: *app-environment
+      AGGREGATION_INTERVAL_SECONDS: ${AGGREGATION_INTERVAL_SECONDS:-60}
+      AGGREGATION_LOOKBACK_DAYS: ${AGGREGATION_LOOKBACK_DAYS:-14}
+    ports:
+      - '127.0.0.1:${AGGREGATION_PORT:-8052}:8000'
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 5s
+      timeout: 6s
+      retries: 15
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    restart: unless-stopped
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: cinema
+      GF_PLUGINS_PREINSTALL_SYNC: grafana-clickhouse-datasource@4.15.0
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/cinema.json
+    ports:
+      - '127.0.0.1:${GRAFANA_PORT:-3050}:3000'
+    volumes:
+      - grafana:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:3000/api/health']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  tests:
+    <<: *app
+    profiles: [test]
+    command: python -m unittest discover -s tests -v
+    depends_on:
+      movie-service:
+        condition: service_healthy
+      aggregation:
+        condition: service_healthy
+      object-storage:
+        condition: service_healthy
+      grafana:
+        condition: service_healthy
+
+volumes:
+  kafka-1:
+  kafka-2:
+  kafka-3:
+  clickhouse:
+  postgres:
+  object-storage:
+  grafana:

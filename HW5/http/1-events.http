@@ -1,0 +1,62 @@
+# UUID фиксированы. Можно повторять без дублей.
+# Проверка схемы v1
+#   docker compose exec -T schema-registry curl -fsS http://localhost:8081/subjects/movie-events-value/versions/1
+
+@movie = http://localhost:8051
+@ch = http://localhost:8123
+@day0 = 2025-02-10
+@day1 = 2025-02-11
+@day7 = 2025-02-17
+
+### 200 Продюсер видит Kafka
+GET {{movie}}/health
+
+### 422 У VIEW_STARTED пропущен прогресс
+POST {{movie}}/events
+Content-Type: application/json
+
+{"user_id":"hw5-demo-alice","movie_id":"arrival","event_type":"VIEW_STARTED","timestamp":"{{day0}}T12:00:00+03:00","device_type":"TV","session_id":"hw5-demo-alice-d0"}
+
+### 201 Алиса начала смотреть Arrival
+POST {{movie}}/events
+Content-Type: application/json
+
+{"event_id":"e5d17851-a91f-4653-be15-96da4361b001","user_id":"hw5-demo-alice","movie_id":"arrival","event_type":"VIEW_STARTED","timestamp":"{{day0}}T12:00:00+03:00","device_type":"TV","session_id":"hw5-demo-alice-d0","progress_seconds":0}
+
+### 201 Алиса досмотрела Arrival
+POST {{movie}}/events
+Content-Type: application/json
+
+{"event_id":"e5d17851-a91f-4653-be15-96da4361b002","user_id":"hw5-demo-alice","movie_id":"arrival","event_type":"VIEW_FINISHED","timestamp":"{{day0}}T13:56:00+03:00","device_type":"TV","session_id":"hw5-demo-alice-d0","progress_seconds":6960}
+
+### 201 Борис начал смотреть Dune
+POST {{movie}}/events
+Content-Type: application/json
+
+{"event_id":"e5d17851-a91f-4653-be15-96da4361b003","user_id":"hw5-demo-boris","movie_id":"dune","event_type":"VIEW_STARTED","timestamp":"{{day0}}T18:00:00Z","device_type":"MOBILE","session_id":"hw5-demo-boris-d0","progress_seconds":0}
+
+### 201 Возвращение Алисы на Day 1
+POST {{movie}}/events
+Content-Type: application/json
+
+{"event_id":"e5d17851-a91f-4653-be15-96da4361b004","user_id":"hw5-demo-alice","movie_id":"interstellar","event_type":"VIEW_STARTED","timestamp":"{{day1}}T18:00:00Z","device_type":"TV","session_id":"hw5-demo-alice-d1","progress_seconds":0}
+
+### 201 Возвращение Бориса на Day 7
+POST {{movie}}/events
+Content-Type: application/json
+
+{"event_id":"e5d17851-a91f-4653-be15-96da4361b005","user_id":"hw5-demo-boris","movie_id":"dune","event_type":"VIEW_STARTED","timestamp":"{{day7}}T18:00:00Z","device_type":"MOBILE","session_id":"hw5-demo-boris-d7","progress_seconds":0}
+
+### 200 Пять событий в ClickHouse, время в UTC
+# Если записей меньше пяти, повторить через секунду.
+POST {{ch}}/
+X-ClickHouse-User: cinema
+X-ClickHouse-Key: cinema
+Content-Type: text/plain
+
+SELECT event_id, user_id, movie_id, event_type, timestamp, device_type, session_id, progress_seconds
+FROM cinema.raw_events FINAL
+WHERE user_id IN ('hw5-demo-alice', 'hw5-demo-boris')
+  AND event_date BETWEEN '{{day0}}' AND '{{day7}}'
+ORDER BY timestamp
+FORMAT JSONEachRow
